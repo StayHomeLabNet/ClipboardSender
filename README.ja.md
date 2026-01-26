@@ -1,138 +1,99 @@
-# クリップボード送信アプリ（Clipboard Sender）
+# Clipboard Sync（Windows 常駐トレイアプリ）
 
-Windows の **システムトレイ常駐型** クリップボード送信アプリです  
-クリップボードの内容を、指定した宛先へすばやく送信できるようにすることを目的にしています  
-Notemod-selfhosted との連携を想定して開発しました。  
-https://github.com/StayHomeLabNet/Notemod-selfhosted
+> 旧名：**Clipboard Sender**（v1.0.0 で *受信* 対応により **Clipboard Sync** に改名）
 
----
+**Clipboard Sync** は **Notemod-selfhosted** 用の軽量な Windows トレイアプリです。  
+クリップボード共有が **双方向** になります。
 
-## 特長
+- **送信**：Windows のクリップボード → Notemod-selfhosted（書き込み）
+- **受信**：Notemod-selfhosted → Windows のクリップボード →（任意）**自動ペースト（Ctrl+V）**
 
-- **システムトレイ常駐**（邪魔にならない運用）
-- **有効/無効の状態が一目で分かるトレイアイコン**
-- 配布時に Assets フォルダが不要になるよう、**アイコン等をアプリに内包（Resources化）** する運用に対応
-- 多言語表示に対応（日本語/英語ほか）  
-  - ※ Notemod の作者に敬意を表して **トルコ語（TR）** を追加しています
+さらに、INBOX の定期削除（Cleanup）と、サーバーに溜まりがちな **バックアップファイルの一括削除** も行えます。
 
----
+## 主な機能
 
-## 想定している利用方法
+- トレイ常駐（メイン画面なし）
+- トレイアイコン左クリックで「送信の有効/無効」を切り替え
+- グローバルホットキーで送信の有効/無効切り替え
+- **送信**：クリップボード文字列を Notemod-selfhosted に POST
+- **受信**：`read_api.php` で最新ノートを取得してクリップボードへコピー
+  - 受信後に **自動ペースト（Ctrl+V）** まで実行（任意）
+  - ペースト前に「クリップボード安定待ち（ms）」を挟める（任意）
+- 削除（Cleanup）
+  - 手動：**INBOX 全削除**
+  - 自動：**定時（1日1回）** または **X 分毎**
+- バックアップ管理（Notemod-selfhosted 側でバックアップ作成を有効にしている場合）
+  - **バックアップファイル数** の表示
+  - **バックアップファイルの一括削除** ボタン
+- BASIC 認証（任意）
+- UI 言語：English / 日本語 / Türkçe
 
-このアプリは、日常の「コピペ作業」を外部サービスに依存せずにもう一段速くするための補助ツールです  
-開発の目的は README 冒頭に書いている通り、次の一点に集約されます
+## 想定用途
 
-- Windows の **システムトレイ常駐型** クリップボード送信アプリです。  
-- クリップボードの内容を、指定した宛先へすばやく送信できるようにすることを目的にしています。
+Notemod-selfhosted（サーバー） + Clipboard Sync（Windows） + iPhone のショートカット/背面タップ/アクションボタン等で、
 
-Notemod-selfhosted と連携することで、次のような用途を想定しています
+- iPhone でコピーした文字列を、Windows 側で **ホットキーを1回押すだけ** で貼り付けまで完了
 
-- PCでコピーしたテキストを、別端末（スマホ／別PC）へすぐ渡したい
-- 定型の送信先（自分用メモ、作業用サーバー、チームの受け口など）へ素早く投げたい
-- 「貼り付け先を探す」手間を減らして、思考を途切れさせずに作業したい
+という使い方を想定しています。
 
-![](Notemod-selfhosted.png)
-
-iPhoneショートカットを使用した例：
-
-- iPhoneのショートカットを利用して、PC のクリップボードの内容を素早く取得
-- iPhoneのショートカットを利用して、Notemod （PC）にクリップボードの内容を素早く送信
-
----
-
-## 動作環境
+## 必要なもの
 
 - Windows 10 / 11
-- .NET デスクトップ環境（WinForms）
-  - 対象フレームワーク: .NET 8
+- .NET 8 Desktop Runtime（配布 EXE 実行用）
+- Notemod-selfhosted が下記 API を提供していること
+  - `api.php`（送信）
+  - `read_api.php`（受信）
+  - `cleanup_api.php`（INBOX 全削除 + バックアップファイル一括削除）
 
----
+> サーバーが BASIC 認証で保護されている場合は、設定画面で入力してください。
 
 ## インストール
 
-1. GitHub の Releases から最新版をダウンロード
- - [GitHub Releases](https://github.com/StayHomeLabNet/ClipboardSender/releases)  
-2. 展開して `.exe` を実行
-
-- 🇯🇵 [Why the exe file is large (日本語)](docs/exe_size_ja.md)
-このアプリは .NET の自己完結型（self-contained）としてビルドされています。
-.NET ランタイムを exe に同梱しているため、追加インストールは不要です。
-
-そのため、ファイルサイズ（約150MB）は想定どおりのものです。
-
----
+1. GitHub Releases から最新版をダウンロード
+2. EXE を起動
+3. トレイメニューの **設定** から URL / token を入力
 
 ## 使い方
 
-### 起動と基本動作
+### 基本動作
 
-- 起動すると **システムトレイ** に常駐します
-- トレイアイコンの状態で **送信が有効 / 無効** を判別できます
+- アプリはトレイに常駐します
+- トレイアイコン左クリックで「送信」の ON/OFF
+- 右クリックメニューから：
+  - INBOX 全削除
+  - 設定
+  - ヘルプ / バージョン情報
 
-### 設定画面
+### 設定画面（タブで切り替え）
 
-![](ClipboardSender.png)
+- **送信/削除設定**
+  - POST 先 URL + token（送信）
+  - BASIC 認証（任意）
+  - Cleanup_API URL + token（INBOX 全削除）
+  - 自動削除スケジュール（定時 / X 分毎）
+  - バックアップファイル数表示 + 一括削除ボタン
+  - 言語
+- **受信設定**
+  - Read API URL
+  - 受信ホットキー
+  - ペーストまで含める（ON/OFF）
+  - クリップボード安定待ち（ms）
 
----
+> ※ 自動ペーストは、貼り付け先アプリが **管理者権限** で動いていると拒否されることがあります。  
+> まずはメモ帳などで動作確認してください。
 
-## ビルド（開発者向け）
+## 開発者向け（ビルド）
 
-### 必要なもの
-
-- Visual Studio（例：Visual Studio 2026）
-- 「.NET デスクトップ開発」ワークロード
-
-### 手順
-
-1. このリポジトリを clone
-2. Visual Studio で `.sln` を開く
-3. `Release` でビルド
-4. 出力された `.exe` を実行
-
----
-
-## アイコン（Resources 化）について
-
-配布時に `Assets/` 等を同梱しなくても動くように、トレイアイコンは **Resources に内包**する運用を推奨しています
-アプリアイコンは、本家Notemodのアイコンを利用させていただきました。
-
-- 例：有効時 `tray_on.ico` / 無効時 `tray_off.ico`（名称はプロジェクトに合わせてOK）
-- `Properties/Resources.resx` に追加して参照することで、`.exe` 単体配布がしやすくなります
-
----
+- Visual Studio 2022 + .NET 8 SDK + WinForms ワークロード
 
 ## セキュリティ / プライバシー
 
-- クリップボードには機密情報が含まれる場合があります
-- 送信先の安全性（HTTPS、認証、保存方法）を確認した上で利用してください
+- 送信するのは「コピーした文字列」です（送信が ON のときのみ）
+- token / パスワードは `settings.json` に保存しますが、**DPAPI（Windows ユーザースコープ）** で暗号化されます
+- インターネット公開する場合は HTTPS + BASIC 認証等を推奨します
 
----
+## Links
 
-## 謝辞
-
-本プロジェクトは、Notemod から多くの学びを得ています  
-その作者への敬意を表し、本アプリの表示言語に **トルコ語（TR）** を追加しています
-
----
-
-## ライセンス
-
-- MIT License
-- `LICENSE` ファイルをリポジトリ直下に追加してください
-
----
-
-## コントリビューション
-
-Issue / Pull Request 大歓迎です
-
-- バグ報告：再現手順、期待結果、実際の結果、OS・バージョンを添えてください
-- 機能提案：ユースケース（なぜ必要か）を書くと議論が進みやすいです
-
----
-
-## 連絡先 / リンク
-
-- [Web](https://stayhomelab.net/)  
-- [Help](https://stayhomelab.net/ClipboardSender)  
-- [Notemod-selfhosted](https://github.com/StayHomeLabNet/Notemod-selfhosted)  
+- Notemod-selfhosted: https://github.com/StayHomeLabNet/Notemod-selfhosted
+- Help: https://stayhomelab.net/Clipboardsync
+- GitHub: https://github.com/StayHomeLabNet/ClipboardSync

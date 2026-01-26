@@ -11,8 +11,8 @@ using System.Windows.Forms;
 using System.Threading.Tasks;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
-using System.Diagnostics;      // ★追加：ヘルプリンクでブラウザ起動
-using System.Linq;             // ★追加：Attributes 取得用
+using System.Diagnostics;
+using System.Linq;
 
 internal static class Program
 {
@@ -28,6 +28,7 @@ internal static class Program
 
 internal sealed class AppSettings
 {
+    // ======= 送信（既存） =======
     public string BaseUrl { get; set; } = "";
     public string TokenEncrypted { get; set; } = "";
 
@@ -38,6 +39,7 @@ internal sealed class AppSettings
     public int HotkeyVk { get; set; } = 0x4E; // N
     public string HotkeyDisplay { get; set; } = "Ctrl + Alt + N";
 
+    // ======= Cleanup（既存） =======
     public string CleanupBaseUrl { get; set; } = "";
     public string CleanupTokenEncrypted { get; set; } = "";
     public bool CleanupPretty { get; set; } = true;
@@ -49,9 +51,22 @@ internal sealed class AppSettings
     public bool CleanupEveryEnabled { get; set; } = false;
     public int CleanupEveryMinutes { get; set; } = 60;
 
+    // ======= 受信（追加） =======
+    public string ReceiveBaseUrl { get; set; } = "";
+    public uint ReceiveHotkeyModifiers { get; set; } = 0x0001 | 0x0002; // Alt|Ctrl
+    public int ReceiveHotkeyVk { get; set; } = 0x52; // R
+    public string ReceiveHotkeyDisplay { get; set; } = "Ctrl + Alt + R";
+
+    // ★追加：受信でペーストまで行うか
+    public bool ReceiveAutoPaste { get; set; } = true;
+
+    // ★追加：「クリップボード安定待ち」ms
+    public int ClipboardStableWaitMs { get; set; } = 60;
+
+    // ======= UI =======
     public string Language { get; set; } = "en"; // "en" / "ja" / "tr"
 
-    // BASIC
+    // BASIC（共通）
     public string BasicUser { get; set; } = "";
     public string BasicPassEncrypted { get; set; } = "";
 }
@@ -80,7 +95,27 @@ internal static class SettingsStore
                     return new AppSettings();
 
                 var json = File.ReadAllText(FilePath);
-                return JsonSerializer.Deserialize<AppSettings>(json) ?? new AppSettings();
+                var s = JsonSerializer.Deserialize<AppSettings>(json) ?? new AppSettings();
+
+                // ★互換：過去に別名で保存されていても読めるようにする
+                using var doc = JsonDocument.Parse(json);
+                var root = doc.RootElement;
+
+                // 別名: ReceivePasteEnabled -> ReceiveAutoPaste
+                if (root.TryGetProperty("ReceivePasteEnabled", out var p1) &&
+                    (p1.ValueKind == JsonValueKind.True || p1.ValueKind == JsonValueKind.False))
+                {
+                    s.ReceiveAutoPaste = p1.GetBoolean();
+                }
+
+                // 別名: ReceiveClipboardStabilizeWaitMs -> ClipboardStableWaitMs
+                if (root.TryGetProperty("ReceiveClipboardStabilizeWaitMs", out var p2) &&
+                    p2.ValueKind == JsonValueKind.Number)
+                {
+                    s.ClipboardStableWaitMs = p2.GetInt32();
+                }
+
+                return s;
             }
             catch
             {
@@ -149,8 +184,7 @@ internal static class BasicAuth
 
 internal sealed class TrayAppContext : ApplicationContext
 {
-    // Docs URL に変更
-    private const string HELP_URL = "https://stayhomelab.net/ClipboardSender";
+    private const string HELP_URL = "https://stayhomelab.net/ClipboardSync";
 
     private readonly NotifyIcon _tray;
     private readonly ClipboardWatcherForm _watcher;
@@ -167,7 +201,6 @@ internal sealed class TrayAppContext : ApplicationContext
     private readonly ToolStripMenuItem _menuDeleteInbox;
     private readonly ToolStripMenuItem _menuSettings;
 
-    // ★追加：Help / About
     private readonly ToolStripMenuItem _menuHelp;
     private readonly ToolStripMenuItem _menuAbout;
 
@@ -188,6 +221,18 @@ internal sealed class TrayAppContext : ApplicationContext
             ContextMenuStrip = new ContextMenuStrip()
         };
 
+        // ★言語変更が「即反映」されるようにする（保存前でも反映）
+        I18n.LanguageChanged += (_, __) =>
+        {
+            RunOnUi(() =>
+            {
+                RefreshTrayTexts();
+                SyncEnabledMenu();
+                UpdateCleanupModeInfo();
+                UpdateCleanupLastResultInfo();
+            });
+        };
+
         _tray.MouseClick += (_, e) =>
         {
             if (e.Button == MouseButtons.Left) ToggleEnabledFromTray();
@@ -201,8 +246,8 @@ internal sealed class TrayAppContext : ApplicationContext
 
         _menuDeleteInbox = new ToolStripMenuItem();
         _menuSettings = new ToolStripMenuItem();
-        _menuHelp = new ToolStripMenuItem();   // ★追加
-        _menuAbout = new ToolStripMenuItem();  // ★追加
+        _menuHelp = new ToolStripMenuItem();
+        _menuAbout = new ToolStripMenuItem();
         _menuExit = new ToolStripMenuItem();
 
         _tray.ContextMenuStrip.Items.Add(_enabledMenuItem);
@@ -215,7 +260,6 @@ internal sealed class TrayAppContext : ApplicationContext
         _tray.ContextMenuStrip.Items.Add(_menuDeleteInbox);
         _tray.ContextMenuStrip.Items.Add(_menuSettings);
 
-        // Help / About を Settings の下に
         _tray.ContextMenuStrip.Items.Add(_menuHelp);
         _tray.ContextMenuStrip.Items.Add(_menuAbout);
 
@@ -261,7 +305,6 @@ internal sealed class TrayAppContext : ApplicationContext
             UpdateCleanupModeInfo();
         };
 
-        // Help（ブラウザ起動）
         _menuHelp.Click += (_, __) =>
         {
             try
@@ -278,7 +321,6 @@ internal sealed class TrayAppContext : ApplicationContext
             }
         };
 
-        // About（バージョン表示）
         _menuAbout.Click += (_, __) =>
         {
             using var top = new Form { TopMost = true, ShowInTaskbar = false };
@@ -302,6 +344,7 @@ internal sealed class TrayAppContext : ApplicationContext
             ShowToggleBalloon(enabled);
         };
 
+        // ★送信（Clipboard → API）
         _watcher.ClipboardTextCopied += async (_, text) =>
         {
             if (!SettingsStore.Current.Enabled) return;
@@ -321,6 +364,58 @@ internal sealed class TrayAppContext : ApplicationContext
                     MessageBoxButtons.OK,
                     ok ? MessageBoxIcon.Information : MessageBoxIcon.Error);
             }
+        };
+
+        // ★受信（Hotkey → Read API → Clipboard → (Option) Paste）
+        _watcher.ReceiveHotkeyPressed += async (_, __) =>
+        {
+            var (ok, textOrErr) = await Receiver.FetchLatestNoteTextAsync();
+
+            if (!ok)
+            {
+                using var top = new Form { TopMost = true, ShowInTaskbar = false };
+                top.StartPosition = FormStartPosition.Manual;
+                top.Location = new System.Drawing.Point(-2000, -2000);
+                top.Show();
+
+                MessageBox.Show(top, textOrErr, I18n.T("ReceiveFailTitle"),
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            var text = textOrErr ?? "";
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                _tray.BalloonTipTitle = I18n.T("ReceiveTitle");
+                _tray.BalloonTipText = I18n.T("ReceiveEmpty");
+                _tray.ShowBalloonTip(1000);
+                return;
+            }
+
+            await ClipboardUtil.TrySetTextAsync(text);
+
+            // ★「クリップボード安定待ち」
+            var waitMs = Math.Max(0, SettingsStore.Current.ClipboardStableWaitMs);
+            if (waitMs > 0) await Task.Delay(waitMs);
+
+            // ★チェックありならペーストまで実行
+            if (SettingsStore.Current.ReceiveAutoPaste)
+            {
+                var okPaste = PasteHelper.CtrlV_FallbackSendKeys();
+                if (!okPaste)
+                {
+                    _tray.BalloonTipTitle = I18n.T("ReceiveTitle");
+                    _tray.BalloonTipText =
+                        "Auto paste failed.\n" +
+                        "・貼り付け先が管理者権限のアプリだと拒否されます\n" +
+                        "・Notepadで試してもダメなら設定/実装側の問題です";
+                    _tray.ShowBalloonTip(2000);
+                }
+            }
+
+            _tray.BalloonTipTitle = I18n.T("ReceiveTitle");
+            _tray.BalloonTipText = I18n.T("ReceiveOkBalloon");
+            _tray.ShowBalloonTip(1000);
         };
 
         _watcher.Show();
@@ -479,28 +574,24 @@ internal static class AppInfo
 {
     public static string GetProductName()
     {
-        // AssemblyProduct があればそれ、なければ asm 名
         var asm = Assembly.GetExecutingAssembly();
         var prod = asm.GetCustomAttributes<AssemblyProductAttribute>().FirstOrDefault()?.Product;
         if (!string.IsNullOrWhiteSpace(prod)) return prod!;
-        return asm.GetName().Name ?? "ClipboardSender";
+        return asm.GetName().Name ?? "Clipboard Sync";
     }
 
     public static string GetVersionString()
     {
-        // 1) InformationalVersion (推奨: 1.2.3 / 1.2.3+gitsha)
         var asm = Assembly.GetExecutingAssembly();
         var info = asm.GetCustomAttributes<AssemblyInformationalVersionAttribute>()
                       .FirstOrDefault()?.InformationalVersion;
 
         if (!string.IsNullOrWhiteSpace(info)) return info!;
 
-        // 2) FileVersion
         var fv = asm.GetCustomAttributes<AssemblyFileVersionAttribute>()
                     .FirstOrDefault()?.Version;
         if (!string.IsNullOrWhiteSpace(fv)) return fv!;
 
-        // 3) AssemblyVersion
         return asm.GetName().Version?.ToString() ?? "0.0.0";
     }
 }
@@ -508,7 +599,9 @@ internal static class AppInfo
 internal sealed class ClipboardWatcherForm : Form
 {
     private const int WM_HOTKEY = 0x0312;
+
     private const int HOTKEY_ID_TOGGLE = 1;
+    private const int HOTKEY_ID_RECEIVE = 2;
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, int vk);
@@ -518,24 +611,33 @@ internal sealed class ClipboardWatcherForm : Form
 
     public event EventHandler<string>? ClipboardTextCopied;
     public event EventHandler<bool>? EnabledToggled;
+    public event EventHandler? ReceiveHotkeyPressed;
 
     private string? _lastClipboardText;
     private DateTime _lastEventAtUtc = DateTime.MinValue;
 
     private static readonly TimeSpan Debounce = TimeSpan.FromMilliseconds(350);
-    private bool _hotkeyRegistered = false;
+
+    private bool _registeredToggle = false;
+    private bool _registeredReceive = false;
 
     public void ApplyHotkeyFromSettings()
     {
-        if (_hotkeyRegistered)
+        if (_registeredToggle)
         {
             UnregisterHotKey(this.Handle, HOTKEY_ID_TOGGLE);
-            _hotkeyRegistered = false;
+            _registeredToggle = false;
+        }
+        if (_registeredReceive)
+        {
+            UnregisterHotKey(this.Handle, HOTKEY_ID_RECEIVE);
+            _registeredReceive = false;
         }
 
         var s = SettingsStore.Current;
-        var ok = RegisterHotKey(this.Handle, HOTKEY_ID_TOGGLE, s.HotkeyModifiers, s.HotkeyVk);
-        _hotkeyRegistered = ok;
+
+        _registeredToggle = RegisterHotKey(this.Handle, HOTKEY_ID_TOGGLE, s.HotkeyModifiers, s.HotkeyVk);
+        _registeredReceive = RegisterHotKey(this.Handle, HOTKEY_ID_RECEIVE, s.ReceiveHotkeyModifiers, s.ReceiveHotkeyVk);
     }
 
     protected override void OnLoad(EventArgs e)
@@ -555,9 +657,11 @@ internal sealed class ClipboardWatcherForm : Form
         {
             _ = HandleClipboardUpdateAsync();
         }
-        else if (m.Msg == WM_HOTKEY && m.WParam.ToInt32() == HOTKEY_ID_TOGGLE)
+        else if (m.Msg == WM_HOTKEY)
         {
-            ToggleEnabled();
+            var id = m.WParam.ToInt32();
+            if (id == HOTKEY_ID_TOGGLE) ToggleEnabled();
+            else if (id == HOTKEY_ID_RECEIVE) ReceiveHotkeyPressed?.Invoke(this, EventArgs.Empty);
         }
 
         base.WndProc(ref m);
@@ -614,6 +718,7 @@ internal sealed class ClipboardWatcherForm : Form
     protected override void OnHandleDestroyed(EventArgs e)
     {
         UnregisterHotKey(this.Handle, HOTKEY_ID_TOGGLE);
+        UnregisterHotKey(this.Handle, HOTKEY_ID_RECEIVE);
         RemoveClipboardFormatListener(this.Handle);
         base.OnHandleDestroyed(e);
     }
@@ -623,6 +728,94 @@ internal sealed class ClipboardWatcherForm : Form
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool RemoveClipboardFormatListener(IntPtr hwnd);
+}
+
+internal static class ClipboardUtil
+{
+    public static async Task TrySetTextAsync(string text)
+    {
+        text = (text ?? "").Replace("\r\n", "\n");
+
+        for (int i = 0; i < 5; i++)
+        {
+            try
+            {
+                Clipboard.SetText(text, TextDataFormat.UnicodeText);
+                return;
+            }
+            catch
+            {
+                await Task.Delay(40);
+            }
+        }
+    }
+}
+
+internal static class Receiver
+{
+    private static readonly HttpClient Client = new()
+    {
+        Timeout = TimeSpan.FromSeconds(15)
+    };
+
+    public static async Task<(bool ok, string infoOrText)> FetchLatestNoteTextAsync()
+    {
+        try
+        {
+            var s = SettingsStore.Current;
+
+            var baseUrl = (s.ReceiveBaseUrl ?? "").Trim();
+            if (string.IsNullOrWhiteSpace(baseUrl))
+                return (false, "Receive (Read API) URL is empty");
+
+            if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out var _))
+                return (false, "Receive (Read API) URL is invalid");
+
+            var token = (DpapiHelper.Decrypt(s.TokenEncrypted) ?? "").Trim();
+            if (string.IsNullOrWhiteSpace(token))
+                return (false, "Token is empty or cannot be decrypted");
+
+            var readUrl = NormalizeReadApiUrl(baseUrl);
+
+            var url = AppendQuery(readUrl, "token", token);
+            url = AppendQuery(url, "action", "latest_note");
+
+            using var req = new HttpRequestMessage(HttpMethod.Get, url);
+            BasicAuth.Apply(req, s);
+
+            using var res = await Client.SendAsync(req);
+            var body = await res.Content.ReadAsStringAsync();
+
+            if (!res.IsSuccessStatusCode)
+                return (false, $"HTTP {(int)res.StatusCode}\n\n{body}");
+
+            return (true, body ?? "");
+        }
+        catch (Exception ex)
+        {
+            return (false, ex.Message);
+        }
+    }
+
+    private static string NormalizeReadApiUrl(string url)
+    {
+        if (url.EndsWith("/api.php", StringComparison.OrdinalIgnoreCase))
+            return url.Substring(0, url.Length - "/api.php".Length) + "/read_api.php";
+
+        if (url.EndsWith("/api/", StringComparison.OrdinalIgnoreCase))
+            return url + "read_api.php";
+
+        if (url.EndsWith("/api", StringComparison.OrdinalIgnoreCase))
+            return url + "/read_api.php";
+
+        return url;
+    }
+
+    private static string AppendQuery(string url, string key, string value)
+    {
+        var sep = url.Contains("?") ? "&" : "?";
+        return url + sep + Uri.EscapeDataString(key) + "=" + Uri.EscapeDataString(value);
+    }
 }
 
 internal static class Sender
@@ -649,7 +842,7 @@ internal static class Sender
             if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out var _))
                 return (false, "settings: invalid url");
 
-            var token = DpapiHelper.Decrypt(s.TokenEncrypted).Trim();
+            var token = (DpapiHelper.Decrypt(s.TokenEncrypted) ?? "").Trim();
             if (string.IsNullOrWhiteSpace(token))
                 return (false, "token is empty or cannot be decrypted");
 
@@ -711,7 +904,7 @@ internal static class CleanupApi
             if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out var _))
                 return (false, "Cleanup_API URL is not set or invalid");
 
-            var token = DpapiHelper.Decrypt(s.CleanupTokenEncrypted).Trim();
+            var token = (DpapiHelper.Decrypt(s.CleanupTokenEncrypted) ?? "").Trim();
             if (string.IsNullOrWhiteSpace(token))
                 return (false, "Cleanup_API token is not set / cannot be decrypted");
 
@@ -743,6 +936,164 @@ internal static class CleanupApi
         {
             return (false, ex.Message);
         }
+    }
+
+    // バックアップファイル数（purge_bak=1 & dry_run=2 で "count" を取得）
+    public static async Task<(bool ok, int count, string info)> GetBackupCountAsync()
+    {
+        try
+        {
+            var s = SettingsStore.Current;
+
+            var baseUrl = (s.CleanupBaseUrl ?? "").Trim();
+            if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out var _))
+                return (false, -1, "Cleanup_API URL is not set or invalid");
+
+            var token = (DpapiHelper.Decrypt(s.CleanupTokenEncrypted) ?? "").Trim();
+            if (string.IsNullOrWhiteSpace(token))
+                return (false, -1, "Cleanup_API token is not set / cannot be decrypted");
+
+            var url = baseUrl;
+            if (s.CleanupPretty) url = AppendQuery(baseUrl, "pretty", "1");
+
+            var kv = new List<KeyValuePair<string, string>>
+            {
+                new("token", token),
+                new("purge_bak", "1"),
+                new("dry_run", "2"),
+            };
+
+            using var content = new FormUrlEncodedContent(kv);
+            content.Headers.ContentType!.CharSet = "utf-8";
+
+            using var req = new HttpRequestMessage(HttpMethod.Post, url) { Content = content };
+            BasicAuth.Apply(req, s);
+
+            using var res = await Client.SendAsync(req);
+            var body = await res.Content.ReadAsStringAsync();
+
+            if (!res.IsSuccessStatusCode)
+                return (false, -1, $"HTTP {(int)res.StatusCode}\n\n{body}");
+
+            var count = TryParseCount(body, out var parsed) ? parsed : -1;
+            if (count < 0)
+                return (false, -1, string.IsNullOrWhiteSpace(body) ? "count not found" : body);
+
+            return (true, count, body ?? "");
+        }
+        catch (Exception ex)
+        {
+            return (false, -1, ex.Message);
+        }
+    }
+
+    // バックアップファイル一括削除（purge_bak=1 & confirm=YES）
+    public static async Task<(bool ok, string info)> PurgeBackupsAsync()
+    {
+        try
+        {
+            var s = SettingsStore.Current;
+
+            var baseUrl = (s.CleanupBaseUrl ?? "").Trim();
+            if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out var _))
+                return (false, "Cleanup_API URL is not set or invalid");
+
+            var token = (DpapiHelper.Decrypt(s.CleanupTokenEncrypted) ?? "").Trim();
+            if (string.IsNullOrWhiteSpace(token))
+                return (false, "Cleanup_API token is not set / cannot be decrypted");
+
+            var url = baseUrl;
+            if (s.CleanupPretty) url = AppendQuery(baseUrl, "pretty", "1");
+
+            var kv = new List<KeyValuePair<string, string>>
+            {
+                new("token", token),
+                new("purge_bak", "1"),
+                new("confirm", "YES"),
+            };
+
+            using var content = new FormUrlEncodedContent(kv);
+            content.Headers.ContentType!.CharSet = "utf-8";
+
+            using var req = new HttpRequestMessage(HttpMethod.Post, url) { Content = content };
+            BasicAuth.Apply(req, s);
+
+            using var res = await Client.SendAsync(req);
+            var body = await res.Content.ReadAsStringAsync();
+
+            if (!res.IsSuccessStatusCode)
+                return (false, $"HTTP {(int)res.StatusCode}\n\n{body}");
+
+            return (true, string.IsNullOrWhiteSpace(body) ? "OK (empty response)" : body);
+        }
+        catch (Exception ex)
+        {
+            return (false, ex.Message);
+        }
+    }
+
+    private static bool TryParseCount(string? body, out int count)
+    {
+        count = -1;
+        if (string.IsNullOrWhiteSpace(body)) return false;
+
+        // まず JSON として読む
+        try
+        {
+            using var doc = JsonDocument.Parse(body);
+            var root = doc.RootElement;
+
+            // "count": 12
+            if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("count", out var c) && c.ValueKind == JsonValueKind.Number)
+            {
+                count = c.GetInt32();
+                return true;
+            }
+
+            // もし {"data":{"count":12}} とかでも拾えるように軽く探索
+            foreach (var prop in root.EnumerateObject())
+            {
+                if (prop.Value.ValueKind == JsonValueKind.Object &&
+                    prop.Value.TryGetProperty("count", out var cc) &&
+                    cc.ValueKind == JsonValueKind.Number)
+                {
+                    count = cc.GetInt32();
+                    return true;
+                }
+            }
+        }
+        catch
+        {
+            // JSONじゃない場合は下へ
+        }
+
+        // フォールバック: "count": の後ろの数字を拾う
+        try
+        {
+            var idx = body.IndexOf("\"count\"", StringComparison.OrdinalIgnoreCase);
+            if (idx < 0) return false;
+
+            var colon = body.IndexOf(':', idx);
+            if (colon < 0) return false;
+
+            int i = colon + 1;
+            while (i < body.Length && char.IsWhiteSpace(body[i])) i++;
+
+            int start = i;
+            while (i < body.Length && char.IsDigit(body[i])) i++;
+
+            if (i <= start) return false;
+
+            var num = body.Substring(start, i - start);
+            if (int.TryParse(num, out var n))
+            {
+                count = n;
+                return true;
+            }
+        }
+        catch { }
+
+        return false;
     }
 
     private static string AppendQuery(string url, string key, string value)
@@ -837,12 +1188,15 @@ internal static class I18n
     private static readonly object _lock = new();
     private static string _lang = "en";
 
+    // ★追加：言語変更通知（保存前でもUIが即反映できる）
+    public static event EventHandler? LanguageChanged;
+
     private static readonly Dictionary<string, Dictionary<string, string>> _dict =
         new(StringComparer.OrdinalIgnoreCase)
         {
             ["en"] = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
-                ["TrayTitle"] = "Clipboard → URL Sender",
+                ["TrayTitle"] = "Clipboard Sync",
                 ["MenuEnabled"] = "Enabled",
                 ["MenuDisabled"] = "Disabled",
                 ["MenuDeleteInbox"] = "Delete all INBOX notes",
@@ -880,11 +1234,14 @@ internal static class I18n
                 ["WordSuccess"] = "Success",
                 ["WordFail"] = "Fail",
 
-                // About
                 ["AboutTitle"] = "About",
                 ["AboutBodyFormat"] = "{0}\nVersion: {1}\n\nHelp: {2}",
 
-                // SettingsForm (省略せずそのまま維持)
+                ["ReceiveTitle"] = "Receive",
+                ["ReceiveOkBalloon"] = "Latest note copied to clipboard",
+                ["ReceiveEmpty"] = "Latest note is empty",
+                ["ReceiveFailTitle"] = "Receive Failed",
+
                 ["SettingsTitle"] = "Settings",
                 ["LangLabel"] = "Language",
                 ["LangEnglish"] = "English",
@@ -922,11 +1279,30 @@ internal static class I18n
                 ["BasicPassLabel"] = "Password",
                 ["ShowBasicPass"] = "Show password",
                 ["BasicIncomplete"] = "If you set a username, please also set a password",
+
+                ["ReceiveUrlLabel"] = "Read API URL",
+                ["ReceiveHotkeyLabel"] = "Receive hotkey (click and press)",
+                ["TabSendDelete"] = "Send/Delete",
+                ["TabReceive"] = "Receive",
+
+                // ★追加：受信設定
+                ["ReceiveAutoPaste"] = "Auto paste after receive",
+                ["ClipboardStableWaitLabel"] = "Clipboard stabilize wait (ms)",
+
+                // バックアップファイル表示/削除
+                ["BakCountLoading"] = "Backup file: (loading...)",
+                ["BakCountNone"] = "Backup file: -",
+                ["BakCountFormat"] = "Backup file(s): {0}",
+                ["BakCountFail"] = "Backup file: ?",
+                ["PurgeBakButton"] = "Delete ALL backup files",
+                ["ConfirmPurgeBakBody"] = "This will delete ALL backup files.\nDo you want to continue?",
+                ["PurgeBakDoneTitle"] = "Backup file delete: Done",
+                ["PurgeBakFailTitle"] = "Backup file delete: Failed",
             },
 
             ["ja"] = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
-                ["TrayTitle"] = "Clipboard → URL Sender",
+                ["TrayTitle"] = "Clipboard Sync",
                 ["MenuEnabled"] = "有効",
                 ["MenuDisabled"] = "無効",
                 ["MenuDeleteInbox"] = "INBOX全削除",
@@ -964,11 +1340,14 @@ internal static class I18n
                 ["WordSuccess"] = "成功",
                 ["WordFail"] = "失敗",
 
-                // About
                 ["AboutTitle"] = "バージョン情報",
                 ["AboutBodyFormat"] = "{0}\nVersion: {1}\n\nヘルプ: {2}",
 
-                // SettingsForm
+                ["ReceiveTitle"] = "受信",
+                ["ReceiveOkBalloon"] = "最新ノートをクリップボードへコピーしました",
+                ["ReceiveEmpty"] = "最新ノートが空です",
+                ["ReceiveFailTitle"] = "受信失敗",
+
                 ["SettingsTitle"] = "設定",
                 ["LangLabel"] = "言語",
                 ["LangEnglish"] = "English",
@@ -1006,11 +1385,30 @@ internal static class I18n
                 ["BasicPassLabel"] = "パスワード",
                 ["ShowBasicPass"] = "パスワードを表示する",
                 ["BasicIncomplete"] = "ユーザー名を設定した場合は、パスワードも設定してください",
+
+                ["ReceiveUrlLabel"] = "Read API URL（受信）",
+                ["ReceiveHotkeyLabel"] = "受信ホットキー（クリックして押す）",
+                ["TabSendDelete"] = "送信/削除設定",
+                ["TabReceive"] = "受信設定",
+
+                // ★追加：受信設定
+                ["ReceiveAutoPaste"] = "ペーストまで含める",
+                ["ClipboardStableWaitLabel"] = "クリップボード安定待ち（ms）",
+
+                // バックアップファイル表示/削除
+                ["BakCountLoading"] = "バックアップファイル: 取得中...",
+                ["BakCountNone"] = "バックアップファイル: -",
+                ["BakCountFormat"] = "バックアップファイル: {0}",
+                ["BakCountFail"] = "バックアップファイル: ?",
+                ["PurgeBakButton"] = "バックアップファイルを全削除",
+                ["ConfirmPurgeBakBody"] = "バックアップファイルを全て削除します\n本当に実行しますか？",
+                ["PurgeBakDoneTitle"] = "バックアップファイル削除：完了",
+                ["PurgeBakFailTitle"] = "バックアップファイル削除：失敗",
             },
 
             ["tr"] = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
-                ["TrayTitle"] = "Clipboard → URL Sender",
+                ["TrayTitle"] = "Clipboard Sync",
                 ["MenuEnabled"] = "Etkin",
                 ["MenuDisabled"] = "Devre dışı",
                 ["MenuDeleteInbox"] = "INBOX'taki tüm notları sil",
@@ -1048,11 +1446,14 @@ internal static class I18n
                 ["WordSuccess"] = "Başarılı",
                 ["WordFail"] = "Başarısız",
 
-                // About
                 ["AboutTitle"] = "Hakkında",
                 ["AboutBodyFormat"] = "{0}\nSürüm: {1}\n\nYardım: {2}",
 
-                // SettingsForm
+                ["ReceiveTitle"] = "Al",
+                ["ReceiveOkBalloon"] = "En son not panoya kopyalandı",
+                ["ReceiveEmpty"] = "En son not boş",
+                ["ReceiveFailTitle"] = "Alma başarısız",
+
                 ["SettingsTitle"] = "Ayarlar",
                 ["LangLabel"] = "Dil",
                 ["LangEnglish"] = "English",
@@ -1090,6 +1491,25 @@ internal static class I18n
                 ["BasicPassLabel"] = "Parola",
                 ["ShowBasicPass"] = "Parolayı göster",
                 ["BasicIncomplete"] = "Kullanıcı adı girerseniz parolayı da girin",
+
+                ["ReceiveUrlLabel"] = "Read API URL",
+                ["ReceiveHotkeyLabel"] = "Alma kısayolu (tıkla ve bas)",
+                ["TabSendDelete"] = "Gönder/Sil",
+                ["TabReceive"] = "Al",
+
+                // 受信設定
+                ["ReceiveAutoPaste"] = "Alınca otomatik yapıştır",
+                ["ClipboardStableWaitLabel"] = "Pano stabilize bekleme (ms)",
+
+                // バックアップ表示/削除
+                ["BakCountLoading"] = "Yedek dosyası: (yükleniyor...)",
+                ["BakCountNone"] = "Yedek dosyası: -",
+                ["BakCountFormat"] = "Yedek dosyası: {0}",
+                ["BakCountFail"] = "Yedek dosyası: ?",
+                ["PurgeBakButton"] = "Tüm yedek dosyalarını sil",
+                ["ConfirmPurgeBakBody"] = "TÜM yedek dosyaları silinecek.\nDevam etmek istiyor musunuz?",
+                ["PurgeBakDoneTitle"] = "Yedek dosyası silme: Tamam",
+                ["PurgeBakFailTitle"] = "Yedek dosyası silme: Başarısız",
             },
         };
 
@@ -1103,11 +1523,19 @@ internal static class I18n
 
     public static void SetLanguage(string? langCode)
     {
+        bool changed = false;
+
         lock (_lock)
         {
-            if (string.IsNullOrWhiteSpace(langCode)) { _lang = "en"; return; }
-            _lang = _dict.ContainsKey(langCode) ? langCode : "en";
+            var before = _lang;
+
+            if (string.IsNullOrWhiteSpace(langCode)) _lang = "en";
+            else _lang = _dict.ContainsKey(langCode) ? langCode : "en";
+
+            changed = !string.Equals(before, _lang, StringComparison.OrdinalIgnoreCase);
         }
+
+        if (changed) LanguageChanged?.Invoke(null, EventArgs.Empty);
     }
 
     public static string CurrentLanguage { get { lock (_lock) return _lang; } }
@@ -1119,6 +1547,120 @@ internal static class I18n
             if (_dict.TryGetValue(_lang, out var d) && d.TryGetValue(key, out var v)) return v;
             if (_dict.TryGetValue("en", out var en) && en.TryGetValue(key, out var ev)) return ev;
             return key;
+        }
+    }
+}
+
+internal static class PasteHelper
+{
+    private const int INPUT_KEYBOARD = 1;
+    private const uint KEYEVENTF_KEYUP = 0x0002;
+    private const uint KEYEVENTF_SCANCODE = 0x0008;
+
+    private const ushort VK_CONTROL = 0x11;
+    private const ushort VK_V = 0x56;
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
+
+    [DllImport("user32.dll")]
+    private static extern uint MapVirtualKey(uint uCode, uint uMapType);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct INPUT
+    {
+        public int type;
+        public InputUnion U;
+    }
+
+    [StructLayout(LayoutKind.Explicit)]
+    private struct InputUnion
+    {
+        [FieldOffset(0)]
+        public KEYBDINPUT ki;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct KEYBDINPUT
+    {
+        public ushort wVk;
+        public ushort wScan;
+        public uint dwFlags;
+        public uint time;
+        public IntPtr dwExtraInfo;
+    }
+
+    private static INPUT ScanDown(ushort vk)
+    {
+        var scan = (ushort)MapVirtualKey(vk, 0); // MAPVK_VK_TO_VSC
+        return new INPUT
+        {
+            type = INPUT_KEYBOARD,
+            U = new InputUnion
+            {
+                ki = new KEYBDINPUT
+                {
+                    wVk = 0,
+                    wScan = scan,
+                    dwFlags = KEYEVENTF_SCANCODE,
+                    time = 0,
+                    dwExtraInfo = IntPtr.Zero
+                }
+            }
+        };
+    }
+
+    private static INPUT ScanUp(ushort vk)
+    {
+        var scan = (ushort)MapVirtualKey(vk, 0);
+        return new INPUT
+        {
+            type = INPUT_KEYBOARD,
+            U = new InputUnion
+            {
+                ki = new KEYBDINPUT
+                {
+                    wVk = 0,
+                    wScan = scan,
+                    dwFlags = KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP,
+                    time = 0,
+                    dwExtraInfo = IntPtr.Zero
+                }
+            }
+        };
+    }
+
+    /// <summary>
+    /// Ctrl+V を実行。SendInputが失敗したら SendKeys にフォールバック。
+    /// 戻り値: true=何かしら送れた / false=完全失敗
+    /// </summary>
+    public static bool CtrlV_FallbackSendKeys()
+    {
+        // まずは SendInput（スキャンコード）
+        try
+        {
+            var inputs = new INPUT[]
+            {
+                ScanDown(VK_CONTROL),
+                ScanDown(VK_V),
+                ScanUp(VK_V),
+                ScanUp(VK_CONTROL),
+            };
+
+            var sent = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<INPUT>());
+            if (sent == inputs.Length) return true;
+        }
+        catch { }
+
+        // フォールバック: SendKeys（WinForms/STA前提）
+        try
+        {
+            SendKeys.SendWait("^v");
+            return true;
+        }
+        catch
+        {
+            return false;
         }
     }
 }

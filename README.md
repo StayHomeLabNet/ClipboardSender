@@ -1,140 +1,128 @@
-# Clipboard Sender (Windows Tray App)
+# Clipboard Sync (Windows Tray App)
 
-A Windows **system-tray resident** clipboard sender.  
-Its goal is to let you send your clipboard contents to a configured destination as quickly as possible.
+> Former name: **Clipboard Sender** (renamed in v1.0.0 after adding *receive* support)
 
-This app was developed with integration with **Notemod-selfhosted** in mind.  
-https://github.com/StayHomeLabNet/Notemod-selfhosted
+**Clipboard Sync** is a lightweight Windows tray app for **Notemod-selfhosted** that makes clipboard sharing *bidirectional*:
 
----
+- **Send**: Windows clipboard → Notemod-selfhosted (write)
+- **Receive**: Notemod-selfhosted → Windows clipboard → *(optional)* auto **paste (Ctrl+V)** with one hotkey
+
+It also supports scheduled **INBOX cleanup** and (if backups are enabled on the server) a one-click **backup file purge** from the Settings screen.
 
 ## Features
 
-- **Runs in the system tray** (stays out of your way)
-- Tray icon makes it easy to see whether sending is **enabled / disabled**
-- No need to ship an `Assets` folder: supports embedding icons/resources into the app (**Resources**)
-- Multi-language UI (Japanese/English and more)  
-  - As a sign of respect for the original Notemod author, **Turkish (TR)** is also included
-
----
+- Tray app (no main window), click tray icon to enable/disable sending
+- Global hotkey to toggle sending
+- **Send** clipboard text to Notemod-selfhosted (POST)
+- **Receive** latest note via `read_api.php` (GET) and copy to clipboard
+  - Optional **auto paste** right after receive (Ctrl+V)
+  - Optional “clipboard stabilize wait (ms)” before pasting
+- Cleanup settings:
+  - Manual **Delete all INBOX notes**
+  - Auto delete **daily** or **every X minutes**
+- Backup maintenance (when Notemod-selfhosted backup is enabled):
+  - Show **current backup file count**
+  - One-click **purge all backup files**
+- Optional **Basic Auth** support
+- UI languages: English / 日本語 / Türkçe
 
 ## Intended use
 
-This app is a helper tool to speed up everyday copy/paste workflows **without relying on external services**.  
-The purpose of this project is summarized in the first lines of this README:
+This app is designed to work with **Notemod-selfhosted** (server) + **Clipboard Sync** (Windows) + iPhone Shortcuts / Back Tap.
 
-- A Windows **system-tray resident** clipboard sender.  
-- Its goal is to let you send your clipboard contents to a configured destination as quickly as possible.
-
-When used together with Notemod-selfhosted, these are typical use cases:
-
-- Quickly pass text copied on a PC to another device (iPhone / another PC)
-- Send clipboard contents to a fixed destination (personal notes, a work server, a team endpoint, etc.)
-- Reduce the friction of “finding where to paste”, so you can stay in the flow
-
-![](Notemod-selfhosted.png)
-
-Examples using iPhone Shortcuts:
-
-- Use iPhone Shortcuts to quickly **fetch** the PC clipboard contents
-- Use iPhone Shortcuts to quickly **send** clipboard contents to Notemod (PC)
-
----
+Example:
+- Copy text on iPhone → (Notemod-selfhosted saves it) → press *Receive hotkey* on Windows → paste into the active app.
 
 ## Requirements
 
-- Windows 10 / 11
-- .NET desktop (WinForms)
-  - Target framework: **.NET 8**
+- Windows 10/11
+- .NET 8 Desktop Runtime (for running the released EXE)
+- A working **Notemod-selfhosted** installation providing:
+  - `api.php` (write / send)
+  - `read_api.php` (read / receive)
+  - `cleanup_api.php` (INBOX delete + backup purge)
 
----
+> If your Notemod-selfhosted is protected by Basic Auth, configure it in Settings.
 
 ## Installation
 
-1. Download the latest release from **GitHub Releases**
- - [GitHub Releases](https://github.com/StayHomeLabNet/ClipboardSender/releases)  
-2. Extract and run the `.exe`
-
-- 🇺🇸 [Why the exe file is large (English)](docs/exe_size_en.md)
-This executable is built as a self-contained .NET application.
-The .NET runtime is bundled inside the exe, so no additional installation is required.
-
-The larger file size (~140MB) is expected and intentional.
-
----
+1. Download the latest release from GitHub Releases.
+2. Run the EXE.
+3. Open **Settings** from the tray menu and set URLs / tokens.
 
 ## Usage
 
 ### Startup & basic behavior
 
-- On startup, the app stays in the **system tray**
-- The tray icon indicates whether sending is **enabled / disabled**
+- The app runs in the system tray.
+- Left-click the tray icon to enable/disable **sending**.
+- Right-click the tray icon to open the menu:
+  - Delete all INBOX notes
+  - Settings
+  - Help / About
 
 ### Settings screen
 
-![](ClipboardSender.png)
+Settings are split into two tabs:
 
----
+- **Send/Delete**
+  - POST URL + token (send)
+  - Basic Auth (optional)
+  - Cleanup_API URL + token (delete INBOX)
+  - Auto delete schedule (daily / every X minutes)
+  - Backup file count + “purge all backup files”
+  - Language
+- **Receive**
+  - Read API URL
+  - Receive hotkey
+  - Auto paste after receive
+  - Clipboard stabilize wait (ms)
+
+> Note: Auto paste may fail when the target application is running as **Administrator**.  
+> Try pasting into Notepad first to verify basic operation.
 
 ## Build (for developers)
 
 ### Prerequisites
 
-- Visual Studio (e.g., Visual Studio 2026)
-- “.NET Desktop Development” workload
+- Visual Studio 2022
+- .NET 8 SDK
+- Windows Forms workload
 
 ### Steps
 
-1. Clone this repository
-2. Open the `.sln` in Visual Studio
-3. Build in `Release`
-4. Run the generated `.exe`
-
----
+1. Open the solution in Visual Studio.
+2. Build / publish.
+3. Ensure icons are included correctly (see next section).
 
 ## About embedding icons/resources (Resources)
 
-To distribute the app as a single folder (without `Assets/`), it is recommended to embed tray icons into **Resources**.
+Tray icons are embedded resources (so the tray icon works even when running from a single folder).
 
-This project uses the original **Notemod** app icon with respect.
-
-- Example: enabled `tray_on.ico` / disabled `tray_off.ico` (names can be adjusted)
-- Add them to `Properties/Resources.resx` and reference them from code to make shipping easier
-
----
+- `Assets/tray_on.ico` → EmbeddedResource
+- `Assets/tray_off.ico` → EmbeddedResource
+- `Assets/app.ico` → ApplicationIcon
 
 ## Security / Privacy
 
-- Clipboard contents may include sensitive information.
-- Make sure your destination is safe (HTTPS, authentication, storage policy, etc.).
-
----
+- The app sends only the clipboard text you copy (when sending is enabled).
+- Tokens/passwords are stored in `settings.json` with **DPAPI encryption** (Windows user profile scope).
+- Consider using HTTPS and Basic Auth if you expose the server on the internet.
 
 ## Acknowledgements
 
-This project learned a lot from Notemod.  
-As a sign of respect for the author, **Turkish (TR)** was added as one of the supported UI languages.
-
----
+- Notemod-selfhosted: https://github.com/StayHomeLabNet/Notemod-selfhosted
 
 ## License
 
-- MIT License  
-- Place the `LICENSE` file at the repository root.
-
----
+MIT License
 
 ## Contributing
 
-Issues and Pull Requests are welcome.
-
-- Bug reports: include steps to reproduce, expected vs actual behavior, OS version, and app version
-- Feature requests: share the use case (“why” it matters) to help discussion
-
----
+Issues / PRs are welcome.
 
 ## Links
 
-- [Web](https://stayhomelab.net/)  
-- [Help](https://stayhomelab.net/ClipboardSender)  
-- [Notemod-selfhosted](https://github.com/StayHomeLabNet/Notemod-selfhosted)  
+- Notemod-selfhosted: https://github.com/StayHomeLabNet/Notemod-selfhosted
+- Help: https://stayhomelab.net/Clipboardsync-en
+- GitHub: https://github.com/StayHomeLabNet/ClipboardSync
